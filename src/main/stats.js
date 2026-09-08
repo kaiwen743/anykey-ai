@@ -1,7 +1,8 @@
 // 打字统计：系统级键状态轮询 + 每键计数 / 每日总数
 // - Windows: user32 GetAsyncKeyState；macOS: CoreGraphics CGEventSourceKeyState（查询键状态无需辅助功能权限）
 // - 不装低级键盘钩子、不读键盘 HID，只读系统键状态，不会与系统抢键盘
-// - 隐私红线：只记「每键计数」和「每日总数」，绝不记录按键顺序、时间戳序列、窗口/应用信息
+// - 隐私红线：只记「每键计数」「每日总数」和「每键最近使用时刻」（单个时间戳，
+//   非时序），绝不记录按键顺序、时间戳序列、窗口/应用信息
 // - 存储：userData/stats.json，防抖写盘（变更后 30s 或满 200 键），仅保留最近 90 天
 
 const fs = require('fs');
@@ -58,7 +59,9 @@ class TypingStats {
     this._dayEndTs = 0;     // 当前日的午夜时刻（跨天检测，免每 tick 拼日期字符串）
     this._flushing = false; // 异步落盘进行中（防并发写）
     // 轴体寿命：独立持久化 lifetime.json，不受 90 天裁剪影响，软件更新不丢
-    this.lifetime = { total: 0, keys: {} };
+    // lastTs：每键最近一次按下的时刻（「按最近排序」的数据源；单时间戳非时序，
+    // 不记按键顺序——隐私红线见文件头）
+    this.lifetime = { total: 0, keys: {}, lastTs: {} };
     this._lifeDirty = false;
     this._lifeFlushing = false;
     this._lifeFailLogged = false;
@@ -101,7 +104,11 @@ class TypingStats {
     try {
       const d = JSON.parse(fs.readFileSync(this.lifetimePath(), 'utf8'));
       if (d && typeof d.total === 'number') {
-        this.lifetime = { total: d.total, keys: d.keys && typeof d.keys === 'object' ? d.keys : {} };
+        this.lifetime = {
+          total: d.total,
+          keys: d.keys && typeof d.keys === 'object' ? d.keys : {},
+          lastTs: d.lastTs && typeof d.lastTs === 'object' ? d.lastTs : {},
+        };
       }
     } catch (_) { /* 不存在或损坏：从零开始 */ }
   }
@@ -239,16 +246,20 @@ class TypingStats {
   }
 
   count(name) {
+    const now = Date.now();
     const d = this.days[this.todayKey] || (this.days[this.todayKey] = { total: 0, keys: {} });
     d.total++;
     d.keys[name] = (d.keys[name] || 0) + 1;
+    d.ts = d.ts || {};                 // 每键最近使用时刻（当日级，随天桶持久化）
+    d.ts[name] = now;
     this.dirty = true;
     this.lastDirtyTs = Date.now();
     // 轴体寿命累计（独立 lifetime.json，不看 90 天窗口）
     this.lifetime.total++;
     this.lifetime.keys[name] = (this.lifetime.keys[name] || 0) + 1;
+    this.lifetime.lastTs = this.lifetime.lastTs || {};
+    this.lifetime.lastTs[name] = now;  // 终身级最近使用时刻（lifetime.json）
     this._lifeDirty = true;
-    const now = Date.now();
     this.lastKeyPressTs = now;
     if (!this.streakStartTs) this.streakStartTs = now; // 从闲到忙，开始新段
     if (++this.pending >= FLUSH_EVERY_KEYS) this.flush(); // 满 200 键立即落盘
@@ -363,8 +374,14 @@ class TypingStats {
       const ds = localDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - i));
       month.push({ date: ds, total: (this.days[ds] || {}).total || 0 });
     }
-    // 轴体寿命：独立 lifetime.json 的全历史累计（不受 90 天裁剪/软件更新影响）
-    return { supported: this.supported, today: { total: today.total || 0, topKeys, keys: today.keys || {} }, week, month, lifetime: this.lifetime };
+    // 轴体寿命：独立 lifetime.json 的全历史累计（不受 90 天裁剪/软件更新影响）；
+    // lastTs 供「按最近使用排序」
+    return {
+      supported: this.supported,
+      today: { total: today.total || 0, topKeys, keys: today.keys || {}, lastTs: today.ts || {} },
+      week, month,
+      lifetime: { ...this.lifetime, lastTs: this.lifetime.lastTs || {} },
+    };
   }
 }
 

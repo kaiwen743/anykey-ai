@@ -270,6 +270,11 @@ function boot() {
     applyStatsCounting(); // 键盘离线 = 打字来自别的键盘，暂停 RK87 计数
     if (win) win.webContents.send('device-status', connected);
   });
+  // 会话离线期间键盘重新可见（枚举边沿）→ 立即叫醒会话重连，免等 60s 轮询。
+  // 2026-09-06 用户实测：长断连后 UI 一直「未连接」要手动点重试，恢复路径必须秒级
+  watcher.on('vendor-online', () => {
+    if (session && !sessionOnline) session.poke();
+  });
   // 有线口（8102）的音频流/麦克风状态同样进主管线（纯有线连接时语音才不至于静默失效）
   watcher.on('audio', buf => { if (!usbSessionOwns()) onAudioPacket(buf); });
   watcher.on('mic', ({ on }) => {
@@ -675,6 +680,10 @@ function exitOfficialRKAI() {
 }
 
 function setAutostart(on) {
+  // dev 实例禁止碰全局自启：登录项是机器级注册表，dev 勾选会用 electron.exe 覆盖
+  // 正式版的自启路径（2026-09-06 实锤：dev 实测把 AnyKey-AI 登录项指到了
+  // node_modules 里的 electron.exe）。正式分发走安装版，此处直接短路
+  if (!app.isPackaged) return;
   app.setLoginItemSettings({ openAtLogin: !!on, name: 'AnyKey-AI' });
 }
 
@@ -855,6 +864,19 @@ function pushSessionDetail() {
   });
 }
 
+// 托盘常驻的节能关键点：建窗时 backgroundThrottling:false（音频桥保险），副作用是
+// 窗口隐藏后页面仍被 Chromium 视为「可见」，RAF 永不停——3D 首屏会在托盘里 60 帧
+// 渲染（2026-09-06 实测：关窗状态下 GPU 进程烧 90% 单核、30h 累计 31h CPU 时间）。
+// 隐藏/最小化时打开页面节流（Chromium 随之把页面标记为 hidden，RAF/定时器全停），
+// 同时显式通知渲染端停 3D 渲染循环（kb3d.setRenderPaused，双保险防事件时序缺口）；
+// 恢复可见时全部反向。窗口事件驱动，无常驻轮询。
+function syncRenderActive() {
+  if (!win || win.isDestroyed()) return;
+  const active = win.isVisible() && !win.isMinimized();
+  try { win.webContents.setBackgroundThrottling(!active); } catch (_) {}
+  win.webContents.send('app-visibility', active);
+}
+
 function showWindow() {
   if (win && win.isDestroyed()) win = null; // 退出中断等场景：防 "Object has been destroyed"
   if (win) {
@@ -895,7 +917,13 @@ function showWindow() {
     }
   });
   win.on('closed', () => { win = null; });
+  // 隐藏到托盘/最小化 → 停渲染；show/restore → 恢复（关窗到托盘走 win.hide()，'hide' 已覆盖）
+  win.on('hide', syncRenderActive);
+  win.on('show', syncRenderActive);
+  win.on('minimize', syncRenderActive);
+  win.on('restore', syncRenderActive);
   win.webContents.on('did-finish-load', () => {
+    syncRenderActive(); // 新页面渲染端默认在跑，加载完先同步一次可见性（崩溃自愈 reload 同样走到这）
     win.webContents.send('device-status', deviceConnected);
     win.webContents.send('session-status', sessionOnline);
     win.webContents.send('ai-mode', aiModeOn);

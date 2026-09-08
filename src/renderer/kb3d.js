@@ -1,10 +1,23 @@
 // 3D 键盘首屏（Three.js）：87 键程序化建模 + 键缝 RGB 透光 + 拖拽旋转 + 点击拾取
 // 性能守门：几何体按键宽共享（7 种）；常驻动画只有悬浮微动；容器滚出视野/页面
-// 隐藏时停渲染循环；悬停拾取只在 pointermove 时做。
+// 隐藏/托盘暂停（setRenderPaused）时停渲染循环；悬停拾取只在 pointermove 时做。
 import * as THREE from '../../vendor/three/three.module.min.js';
 import { animate, stagger } from '../../vendor/animejs/anime.esm.min.js';
 
 const U = 1; // 1 键帽单位
+
+// ---------- 托盘暂停（全实例共享） ----------
+// 窗口隐藏/最小化到托盘时主进程发 app-visibility=false（见 index.js syncRenderActive），
+// app.js 调这里的 setRenderPaused 停掉所有实例的渲染循环。页面级 document.hidden
+// 依赖主进程隐藏期打开 backgroundThrottling 才会变 true，且事件时序不保证——
+// 显式开关是主保险，页面可见性只是自然兜底（2026-09-06 GPU 进程 31h CPU 的修复）
+let renderPaused = false;
+const liveLoops = new Set(); // 各实例的 tick 函数：恢复时逐个拉起
+export function setRenderPaused(p) {
+  if (renderPaused === p) return;
+  renderPaused = p;
+  if (!p && !document.hidden) for (const tick of liveLoops) tick();
+}
 
 // ---------- TKL 87 键布局（视觉近似）：[键id|null, 宽度u]，null=装饰键 ----------
 // 可配置键 id 必须与 keymap.js 一致；标准键 id 供热力图用（阶段 3）
@@ -276,18 +289,19 @@ export function createKeyboard3D(container, { onKeyClick, intro = false } = {}) 
     }
   }
 
-  // ---------- 渲染循环：视野外/页面隐藏即停 ----------
+  // ---------- 渲染循环：视野外/页面隐藏/托盘暂停即停 ----------
   let visible = true, raf = 0, t0 = performance.now();
   const io = new IntersectionObserver(entries => {
     visible = entries[0].isIntersecting;
-    if (visible && !raf && !document.hidden) tick(); // 滚回视野：重启渲染循环
+    if (visible && !raf && !document.hidden && !renderPaused) tick(); // 滚回视野：重启渲染循环
   }, { threshold: .05 });
   io.observe(container);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) tick(); });
+  liveLoops.add(tick); // setRenderPaused 恢复时逐实例拉起（页面存续期内不清理，实例至多 2 个）
 
   function tick() {
     raf = 0;
-    if (!visible || document.hidden) return;
+    if (!visible || document.hidden || renderPaused) return;
     const t = (performance.now() - t0) / 1000;
     // 悬浮微动 + 未拖拽时缓慢摇摆
     world.rotation.y = rotY + Math.sin(t * .3) * .045;

@@ -34,4 +34,6 @@ contextBridge.exposeInMainWorld('aikey', {
   log: msg => ipcRenderer.send('renderer-log', String(msg).slice(0, 300)),
   // AI 层（任意键盘：触发键+F1~F12 → 动作槽位）
   aiLayerOp: payload => ipcRenderer.invoke('ailayer-op', payload),
+  // 窗口可见性（托盘隐藏/最小化 = false）：渲染端据此停 3D 渲染循环
+  onAppVisibility: cb => ipcRenderer.on('app-visibility', (_e, visible) => cb(!!visible)),
 });

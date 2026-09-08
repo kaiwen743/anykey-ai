@@ -1,6 +1,6 @@
 // 设置页逻辑：键位列表 + 动作编辑 + 实时按键高亮标定
 
-import { createKeyboard3D } from './kb3d.js';
+import { createKeyboard3D, setRenderPaused } from './kb3d.js';
 import { animate, stagger } from '../../vendor/animejs/anime.esm.min.js';
 
 const TYPES = [
@@ -101,6 +101,9 @@ async function init() {
   initSound();
   initStats();
   initAiLayer();
+
+  // 托盘隐藏/最小化 → 停 3D 渲染循环（主进程同时会开页面节流，双保险省一个核以上）
+  window.aikey.onAppVisibility(visible => setRenderPaused(!visible));
 
   // 宏 30s 超时自动停 → 回填正在录制的行
   window.aikey.onMacroRecorded(data => {
@@ -1212,6 +1215,36 @@ function keyLabel(name) {
 }
 
 let statsTimer = null;
+// ---------- 打字统计页 ----------
+let heatMode = 'today'; // 热力图数据源：today=今日 | life=累计寿命
+let tkSort = 'count';   // 今日键位列表排序：count=按次数 | recent=按最近使用
+
+function relTime(ts) {
+  const dt = Date.now() - ts;
+  if (!(dt >= 0)) return '';
+  if (dt < 60e3) return '刚刚';
+  if (dt < 3600e3) return Math.floor(dt / 60e3) + ' 分钟前';
+  if (dt < 86400e3) return Math.floor(dt / 3600e3) + ' 小时前';
+  return Math.floor(dt / 86400e3) + ' 天前';
+}
+
+function tkRow(name, count, max, countText) {
+  const row = document.createElement('div');
+  row.className = 'tk-row';
+  const nm = document.createElement('span');
+  nm.className = 'tk-name';
+  nm.textContent = keyLabel(name);
+  const bar = document.createElement('div');
+  bar.className = 'tk-bar';
+  bar.style.width = Math.max(3, Math.round(count / max * 100)) + '%';
+  const ct = document.createElement('span');
+  ct.className = 'tk-count';
+  ct.textContent = countText != null ? countText : count;
+  ct.title = `${count.toLocaleString()} 次`;
+  row.append(nm, bar, ct);
+  return row;
+}
+
 function initStats() {
   const opt = document.getElementById('opt-stats');
   opt.checked = state.settings.statsEnabled !== false;
@@ -1250,8 +1283,21 @@ function initStats() {
     const v = Math.max(5, Math.min(120, Number(fatMin.value) || 25));
     fatMin.value = v;
     state.settings.fatigueMinutes = v;
-    window.aikey.setSettings({ fatigueMinutes: v });
+    window.aikey.setSettings({ fatigueEnabled: optFat.checked });
   };
+  // 迷你分段切换：热力图数据源（今日/累计寿命）与键位列表排序（次数/最近）
+  const wireMiniTabs = (id, set) => {
+    const btns = document.querySelectorAll(`#${id} .mini-tab`);
+    btns.forEach(b => {
+      b.onclick = () => {
+        set(b);
+        btns.forEach(x => x.classList.toggle('active', x === b));
+        refreshStats();
+      };
+    });
+  };
+  wireMiniTabs('heat-mode', b => { heatMode = b.dataset.m; });
+  wireMiniTabs('tk-sort', b => { tkSort = b.dataset.s; });
   if (statsTimer) clearInterval(statsTimer);
   // 统计页可见时才轮询（切到统计页时会立即手动刷一次）
   statsTimer = setInterval(() => {
@@ -1277,35 +1323,38 @@ async function refreshStats() {
   // 今日总数
   document.getElementById('stats-today').textContent = (s.today.total || 0).toLocaleString();
 
-  // 今日 Top5 键（水平条）
+  // 今日键位列表：按次数（Top5）或按最近使用（最近按过的排最前，附相对时间）
   const topBox = document.getElementById('stats-topkeys');
   topBox.innerHTML = '';
-  const top = (s.today.topKeys || []).slice(0, 5);
-  const max = top.length ? top[0].count : 0;
-  for (const k of top) {
-    const row = document.createElement('div');
-    row.className = 'tk-row';
-    const name = document.createElement('span');
-    name.className = 'tk-name';
-    name.textContent = keyLabel(k.name);
-    const bar = document.createElement('div');
-    bar.className = 'tk-bar';
-    bar.style.width = Math.max(3, Math.round(k.count / max * 100)) + '%';
-    const count = document.createElement('span');
-    count.className = 'tk-count';
-    count.textContent = k.count;
-    row.append(name, bar, count);
-    topBox.appendChild(row);
-  }
-  if (!top.length) {
-    const empty = document.createElement('span');
-    empty.className = 'none-hint';
-    empty.textContent = '今天还没有按键记录';
-    topBox.appendChild(empty);
+  if (tkSort === 'recent') {
+    const lastTs = s.today.lastTs || {};
+    const recent = Object.entries(s.today.keys || {})
+      .filter(([n]) => lastTs[n])
+      .sort((a, b) => (lastTs[b[0]] || 0) - (lastTs[a[0]] || 0))
+      .slice(0, 5);
+    const rmax = Math.max(1, ...recent.map(([, c]) => c));
+    for (const [n, c] of recent) topBox.appendChild(tkRow(n, c, rmax, relTime(lastTs[n])));
+    if (!recent.length) {
+      const empty = document.createElement('span');
+      empty.className = 'none-hint';
+      empty.textContent = '今天还没有按键记录';
+      topBox.appendChild(empty);
+    }
+  } else {
+    const top = (s.today.topKeys || []).slice(0, 5);
+    const max = top.length ? top[0].count : 0;
+    for (const k of top) topBox.appendChild(tkRow(k.name, k.count, max));
+    if (!top.length) {
+      const empty = document.createElement('span');
+      empty.className = 'none-hint';
+      empty.textContent = '今天还没有按键记录';
+      topBox.appendChild(empty);
+    }
   }
 
-  // 今日键位热力：3D 键盘逐键点亮（惰性创建：首次切到统计页才建 WebGL 上下文）
-  if (kbStats) kbStats.setHeat(s.today.keys || {});
+  // 键位热力：3D 键盘逐键点亮（惰性创建：首次切到统计页才建 WebGL 上下文）。
+  // 数据源可切：今日计数 / 累计寿命（lifetime.keys 全历史计数）
+  if (kbStats) kbStats.setHeat(heatMode === 'life' ? (s.lifetime.keys || {}) : (s.today.keys || {}));
 
   // 轴体寿命（累计 ÷ 单键 5000 万次额定寿命，趣味估算）
   renderSwitchLife(s.lifetime);

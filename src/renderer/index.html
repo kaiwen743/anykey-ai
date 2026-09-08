@@ -164,15 +164,29 @@
             <div id="stats-today">0</div>
             <span>今日按键</span>
           </div>
-          <div class="stats-topkeys" id="stats-topkeys"></div>
+          <div class="stats-topkeys">
+            <div class="tk-head">
+              <span class="mini-tabs" id="tk-sort">
+                <button class="mini-tab active" data-s="count">按次数</button>
+                <button class="mini-tab" data-s="recent">按最近</button>
+              </span>
+            </div>
+            <div id="stats-topkeys"></div>
+          </div>
         </div>
         <div class="stats-week" id="stats-week"></div>
-        <div class="heatmap-title">今日键位热力图 <small>（3D 键盘点亮图，越亮按得越多，含修饰键）</small></div>
+        <div class="heatmap-title">键位热力图
+          <span class="mini-tabs" id="heat-mode">
+            <button class="mini-tab active" data-m="today">今日</button>
+            <button class="mini-tab" data-m="life">累计寿命</button>
+          </span>
+          <small>（3D 键盘点亮图，越亮按得越多，含修饰键）</small>
+        </div>
         <div class="stats-kb3d" id="stats-kb3d"></div>
         <div class="heatmap-title">轴体寿命 <small>（按 5000 万次/键额定寿命估算，纯趣味）</small></div>
         <div id="switch-life" style="margin-bottom:6px"></div>
       </div>
-      <p class="sub">隐私：只记录每键计数与每日总数，不记录按键顺序、时间与应用信息，数据仅存本机（保留 90 天）。</p>
+      <p class="sub">隐私：只记录每键计数、每日总数与每键最近使用时刻（单个时间戳），不记录按键顺序、时间序列与应用信息，数据仅存本机（保留 90 天）。</p>
     </section>
     </div>
   </main>
