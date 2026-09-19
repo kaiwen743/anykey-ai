@@ -101,8 +101,6 @@ class KeySession extends EventEmitter {
     this._usbFailStreak = 0;  // USB 口连续握手超时（跨轮累计，USB 握手成功才清零）
     this._usbBlockedUntil = 0; // USB 熔断截止时刻（0=未熔断）
     this._offlineEmitTs = 0;  // 最近一次离线 state 发出时刻（60s 限频防日志刷屏）
-    this._lastPoke = 0;       // 上次 watcher 叫醒重连时刻（5s 节流，防枚举抖动风暴）
-    this._enumSig = null;     // 离线期枚举签名（数量+pid+路径尾）：变化才打观测日志
   }
 
   start() {
@@ -140,12 +138,10 @@ class KeySession extends EventEmitter {
   _open() {
     if (this.stopped) return;
     // 重连并发防护：手动重连（reconnect）与挂起的定时重连（watchTimer）叠加会
-    // 双开 HID 句柄、泄漏旧心跳 interval。开口前先撤销挂起重连。
-    // dev 检查必须在清 hbTimer 之前：会话在线时它的 hbTimer 是现役心跳不是残留，
-    // 先清再 return = 会话还在但心跳已死的僵尸（打字全挂且永不断线检测）
+    // 双开 HID 句柄、泄漏旧心跳 interval。开口前先撤销挂起重连与残留心跳。
     if (this.watchTimer) { clearTimeout(this.watchTimer); this.watchTimer = null; }
-    if (this.dev) return;
     if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; }
+    if (this.dev) return; // 已有活动句柄：当前会话由握手超时/心跳看护管理，勿重开
     try {
       if (!this.binding) this.binding = loadBinding();
       // 熔断到期：解除并通知 watcher 收回 8102 读权，给 USB 一次重试机会
@@ -161,14 +157,6 @@ class KeySession extends EventEmitter {
         // 全部候选都试过仍无回应：清空重来（键盘可能切换了连接模式）
         if (cands.length) this.triedPaths.clear();
         this._absentStreak = (this._absentStreak || 0) + 1; // 设备缺席：退避计数（见 _scheduleReconnect）
-        // 枚举观测：签名（数量+pid+路径尾）变化才打一行。定位「键盘明明回来了却长期
-        // no-cmd-interface」（2026-09-06 用户实测：UI 一直未连接，手动重试秒连）——
-        // 区分「枚举看不见设备」vs「看见了没下手」，下次复现日志即铁证
-        const sig = cands.map(d => d.productId + ':' + String(d.path || '').slice(-20)).sort().join('|');
-        if (sig !== this._enumSig) {
-          this._enumSig = sig;
-          console.log(`[session] 枚举到 ${cands.length} 个厂商接口${cands.length ? ': ' + sig : '(空)'}`);
-        }
         this._emitOffline('no-cmd-interface');
         this._scheduleReconnect();
         return;
@@ -409,7 +397,8 @@ class KeySession extends EventEmitter {
     // AI 模式切换键上报
     if (cmd === 209 && len === 1) {
       this.pressed.clear(); // 切换瞬间边沿状态作废：按住中的键不会再有对应抬起码
-      this.emit('ai-mode', { on: payload[0] === 1 });
+      // The firmware's mode flag is inverted: 0 = AI mode, 1 = normal mode.
+      this.emit('ai-mode', { on: payload[0] === 0 });
       return;
     }
     // 按键上报（cmd=159，payload[0]=键码）：蓝牙/2.4G 连接时按键只走此口，需转发
@@ -556,7 +545,6 @@ class KeySession extends EventEmitter {
     kbdInject.reset();    // 回注侧同样清边沿（残留按下的键全部抬起）
     this.pendingHb = false;
     this.hbMiss = 0;
-    this._enumSig = null; // 新离线 episode：重新记录枚举基线
     if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; }
     if (this.hsTimer) { clearTimeout(this.hsTimer); this.hsTimer = null; }
     if (this._probe12) { clearInterval(this._probe12); this._probe12 = null; }
@@ -625,20 +613,6 @@ class KeySession extends EventEmitter {
         console.log(`[session] 写失败（${tag}，第 ${this._writeFail} 次）: ${e.message}`);
       }
     }
-  }
-
-  // watcher 叫醒重连：键盘枚举回来（离线期间被 watcher 看见）时立即开口，不必等
-  // 60s 轮询。长断连恢复的用户体感就是这里——2026-09-06 实测 60s 轮询整夜都在跑、
-  // 键盘回来了却始终 no-cmd-interface，手动点重试才连上。节流 5s 防枚举抖动风暴；
-  // 不动 USB 熔断账目（那是有意的退让，解除靠冷却到期或用户手动 reconnect）
-  poke() {
-    if (this.stopped || this.dev) return;
-    const now = Date.now();
-    if (now - this._lastPoke < 5000) return;
-    this._lastPoke = now;
-    if (this.watchTimer) { clearTimeout(this.watchTimer); this.watchTimer = null; }
-    console.log('[session] 键盘重新可见（watcher），立即重连');
-    this._open();
   }
 
   // ---------- 对外控制 ----------

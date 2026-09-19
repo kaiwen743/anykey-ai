@@ -9,7 +9,6 @@ const TARGETS = [
   { vid: 0x248a, pid: 0x8102, name: 'R87 Pro AI (有线)' },
   // 蓝牙口(8243)专留给 KeySession（kb-session.js）——多句柄抢读会掐断命令会话
 ];
-const BT_PID = 0x8243; // 蓝牙/dongle 命令口：本模块只枚举不开口（抢读会掐死会话）
 
 // USB 口(8102)默认挂起：会话与 watcher 抢读同一厂商接口时，Windows 把输入报文
 // 只投给其中一个句柄（2026-08-30 实锤：watcher 持句柄期间会话 USB 握手 4 万次
@@ -31,8 +30,6 @@ class KeyboardWatcher extends EventEmitter {
     this.usbSuspended = true; // 默认让 8102 给 KeySession（见文件头注释）
     this.usbPresent = false;  // 枚举级在线检测（挂起期间也算，供托盘/UI 显示）
     this._pathInfo = new Map(); // path -> 枚举信息（suspendUsb 按 pid 定向关句柄）
-    this.vendorPresent = false; // 任一厂商接口（8102+8243）枚举可见（边沿事件源）
-    this._vendorInit = false;
   }
 
   // 挂起=不新开 8102 且立即关掉已开句柄（把报文读取权整个让给会话）
@@ -111,24 +108,6 @@ class KeyboardWatcher extends EventEmitter {
       if (!wanted.has(path)) this.drop(path);
     }
     this._emitPresence(list);
-    this._emitVendorPresence(list);
-  }
-
-  // 厂商接口在线边沿（8102 有线 + 8243 蓝牙/dongle）：只枚举不开口。会话离线期间
-  // 键盘一回来（枚举可见）就发 vendor-online，由 index.js 叫醒 KeySession 立即重连，
-  // 免等 60s 轮询——长断连恢复体感的关键路径（2026-09-06）
-  _emitVendorPresence(list) {
-    const present = list.some(d =>
-      d.vendorId === TARGETS[0].vid && (d.productId === USB_PID || d.productId === BT_PID) &&
-      d.usagePage >= 0xff00);
-    if (!this._vendorInit) {
-      this._vendorInit = true; // 首轮扫描只建基线不触发（boot 时会话自己会开口）
-      this.vendorPresent = present;
-      return;
-    }
-    if (present === this.vendorPresent) return;
-    this.vendorPresent = present;
-    if (present) this.emit('vendor-online');
   }
 
   // 枚举级在线检测：与句柄解耦——8102 挂起期间托盘/设置页照样能显示「键盘已连接」
@@ -194,7 +173,10 @@ class KeyboardWatcher extends EventEmitter {
     // AI 模式切换键：独立命令 cmd=209(0xD1)，data 1=进入 / 0=退出（实测确认）
     if (frame.cmd === 209 && frame.dataLen === 1) {
       this.pressed.clear(); // 切换瞬间边沿状态作废：按住中的键不会再有对应抬起码
-      this.emit('ai-mode', { on: frame.data[0] === 1 });
+      // RK firmware reports 0 while the AI layer is active and 1 in the
+      // normal layer.  Keep the UI/action routing aligned with the physical
+      // keyboard mode.
+      this.emit('ai-mode', { on: frame.data[0] === 0 });
       return;
     }
 
